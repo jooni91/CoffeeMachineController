@@ -1,3 +1,4 @@
+using Json.NETMF;
 using Maple;
 using System;
 using System.Collections;
@@ -8,7 +9,7 @@ namespace CoffeeMachineController
     {
         public void getStatus()
         {
-
+            SendSuccessStatusResponse(JsonSerializer.SerializeObject(Application.Instance.RequestCoffeeMachineStatus()));
         }
 
         public void postTurnOn()
@@ -38,17 +39,29 @@ namespace CoffeeMachineController
             SendSuccessStatusResponse();
         }
 
+        public void postChangeDelay()
+        {
+            int delay = 0;
+
+            // Parse any parameters of the request that exist
+            if (QueryString.Contains("minutes"))
+                delay = Convert.ToInt32(QueryString["minutes"].ToString());
+
+            Application.Instance?.RequestChangeBrewingDelay(delay);
+            SendSuccessStatusResponse();
+        }
+
         private void SendSuccessStatusResponse()
         {
             Context.Response.ContentType = "application/json";
             Context.Response.StatusCode = 200;
             Send();
         }
-        private void SendSuccessStatusResponse(Hashtable result)
+        private void SendSuccessStatusResponse(string jsonString)
         {
             Context.Response.ContentType = "application/json";
             Context.Response.StatusCode = 200;
-            Send(result);
+            Send(jsonString);
         }
     }
 }

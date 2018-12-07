@@ -29,17 +29,23 @@ namespace CoffeeMachineController
         /// </summary>
         private const int TURN_OFF_MIN_DEFAULT = 45;
         private const string NTP_POOL_URL = "fi.pool.ntp.org";
-        private const int NTP_OFFSET = 0;
+        private const int NTP_OFFSET = 2;
 
         private NetworkInterface[] _networkInterfaces;
+        private CoffeeMachineState machineState = CoffeeMachineState.None;
         private Timer TurnOffCoffeeTimer { get; set; }
         private Timer TurnOnCoffeeMachineTimer { get; set; }
 
         public bool IsRunning { get; private set; }
-        public DateTime MachineRunningSince { get; } = DateTime.Now;
+        public DateTime MachineRunningSince { get; private set; }
         public DateTime BrewingCoffeeAt { get; private set; }
+        public DateTime TurningMachineOffAt { get; set; }
         public DateTime CurrentMachineStateSince { get; private set; }
-        public CoffeeMachineState MachineState { get; set; }
+        public CoffeeMachineState MachineState
+        {
+            get { return machineState; }
+            set { machineState = value; CurrentMachineStateSince = DateTime.Now; }
+        }
         public TurnOffMode TurnOffMode { get; set; }
 
         public static Application Instance { get; private set; }
@@ -57,10 +63,6 @@ namespace CoffeeMachineController
         {
             Instance = new Application();
             Instance.IsRunning = true;
-
-            Instance.MachineState = CoffeeMachineState.Standby;
-            Instance.TurnOffMode = TurnOffMode.Automatic;
-            Instance.CurrentMachineStateSince = DateTime.Now;
 
             Instance.Initialize();
         }
@@ -86,6 +88,12 @@ namespace CoffeeMachineController
                 Utility.SetLocalTime(NTPTime(NTP_POOL_URL, NTP_OFFSET));
                 Debug.Print("Local time was set. Current local time is " + DateTime.Now);
 
+                //Setup initial time variables
+                MachineRunningSince = DateTime.Now;
+
+                MachineState = CoffeeMachineState.Standby;
+                TurnOffMode = TurnOffMode.Automatic;
+
                 // start web server
                 MapleServer server = new MapleServer();
                 server.Start();
@@ -97,9 +105,21 @@ namespace CoffeeMachineController
         /// Get the status of the coffee maker
         /// </summary>
         /// <param name="clientSocket"></param>
-        public void RequestCoffeeMachineStatus()
+        public CoffeeMachineStatus RequestCoffeeMachineStatus()
         {
-            
+            var response = new CoffeeMachineStatus();
+            response.uptime = MachineRunningSince;
+            response.lastchangedstate = CurrentMachineStateSince;
+            response.state = ConvertStateEnumToString(MachineState);
+            response.mode = TurnOffMode == TurnOffMode.Automatic ? "automatic" : "manual";
+
+            if (MachineState == CoffeeMachineState.TimedForActivation)
+                response.startingbrewat = BrewingCoffeeAt;
+
+            if (MachineState == CoffeeMachineState.Brewing && TurnOffMode == TurnOffMode.Automatic)
+                response.turningoffat = TurningMachineOffAt;
+
+            return response;
         }
 
 
@@ -115,9 +135,13 @@ namespace CoffeeMachineController
         {
             TurnOffMode = turnOffMode;
 
-            // Delay the brewing if requested
-            if (delayBrewingByMinutes > 0)
+            // Delay the brewing if requested and the machine was not already in brewing mode
+            if (delayBrewingByMinutes > 0 && MachineState != CoffeeMachineState.Brewing)
             {
+                // Check if request is overriding previous request and dispose
+                // previous turn on timer in that case.
+                TurnOnCoffeeMachineTimer?.Dispose();
+
                 this.MachineState = CoffeeMachineState.TimedForActivation;
 
                 BrewingCoffeeAt = DateTime.Now.AddMinutes(delayBrewingByMinutes);
@@ -129,6 +153,10 @@ namespace CoffeeMachineController
             }
             else
             {
+                // Check if request is overriding previous request and dispose
+                // previous turn on timer in that case.
+                TurnOnCoffeeMachineTimer?.Dispose();
+
                 TurnOnCoffeeMachine(customMinutesToTurnOff);
             }
         }
@@ -140,13 +168,33 @@ namespace CoffeeMachineController
         public void RequestTurnOffCoffeeMachine()
         {
             // Release and stop the delayed brewing
-            if (TurnOnCoffeeMachineTimer != null)
-                TurnOnCoffeeMachineTimer.Dispose();
+            TurnOnCoffeeMachineTimer?.Dispose();
 
             BrewingCoffeeAt = DateTime.MinValue;
 
             // Finally turn the machine off
             TurnOffCoffeeMachine();
+        }
+
+
+        public void RequestChangeBrewingDelay(int minutes)
+        {
+            if (MachineState == CoffeeMachineState.TimedForActivation)
+            {
+                var delay = BrewingCoffeeAt.AddMinutes(minutes);
+                TimeSpan dueDate;
+
+                if (delay < DateTime.Now)
+                    dueDate = new TimeSpan(0, 0, 0, 0, 1);
+                else
+                {
+                    BrewingCoffeeAt = delay;
+
+                    dueDate = delay - DateTime.Now;
+                }
+
+                TurnOnCoffeeMachineTimer.Change(dueDate, dueDate.Add(new TimeSpan(1,0,0)));
+            }
         }
         
 
@@ -158,8 +206,7 @@ namespace CoffeeMachineController
         private void TurnOnCoffeeMachine(int customMinutesToTurnOff = 0)
         {
             // If delay timer was running, dispose it at this point
-            if (TurnOnCoffeeMachineTimer != null)
-                TurnOnCoffeeMachineTimer.Dispose();
+            TurnOnCoffeeMachineTimer?.Dispose();
 
             this.MachineState = CoffeeMachineState.Brewing;
 
@@ -169,9 +216,20 @@ namespace CoffeeMachineController
             // Setup automatic turn off if requested by the client.
             if (TurnOffMode == TurnOffMode.Automatic)
             {
+                // Check if request is overriding previous request and dispose
+                // previous turn off timer in that case.
+                TurnOffCoffeeTimer?.Dispose();
+
                 TimeSpan dueTime = new TimeSpan(0, customMinutesToTurnOff <= 0 ? TURN_OFF_MIN_DEFAULT : customMinutesToTurnOff, 0);
+                TurningMachineOffAt = DateTime.Now.AddTicks(dueTime.Ticks);
                 
                 TurnOffCoffeeTimer = new Timer((obj) => { TurnOffCoffeeMachine(); }, null, dueTime, dueTime);
+            }
+            else
+            {
+                // Check if request is overriding previous request and dispose
+                // previous turn off timer in that case.
+                TurnOffCoffeeTimer?.Dispose();
             }
         }
 
@@ -182,8 +240,7 @@ namespace CoffeeMachineController
         private void TurnOffCoffeeMachine()
         {
             // If automatic turn off timer was running, dispose it at this point
-            if (TurnOffCoffeeTimer != null)
-                TurnOffCoffeeTimer.Dispose();
+            TurnOffCoffeeTimer?.Dispose();
 
             this.MachineState = CoffeeMachineState.Standby;
 
@@ -401,6 +458,21 @@ namespace CoffeeMachineController
             DateTime networkDateTime = (dateTime + offsetAmount);
 
             return networkDateTime;
+        }
+
+        private string ConvertStateEnumToString(CoffeeMachineState state)
+        {
+            switch (state)
+            {
+                case CoffeeMachineState.Brewing:
+                    return "brewing";
+                case CoffeeMachineState.Standby:
+                    return "standby";
+                case CoffeeMachineState.TimedForActivation:
+                    return "brewingsoon";
+                default:
+                    return "none";
+            }
         }
     }
 }
