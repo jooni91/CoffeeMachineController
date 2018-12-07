@@ -1,12 +1,11 @@
-using System;
-using Microsoft.SPOT;
-using System.Net.Sockets;
-using System.Net;
-using System.Threading;
-using Microsoft.SPOT.Hardware;
-using SecretLabs.NETMF.Hardware.Netduino;
-using Microsoft.SPOT.Net.NetworkInformation;
 using Maple;
+using Microsoft.SPOT;
+using Microsoft.SPOT.Hardware;
+using Microsoft.SPOT.Net.NetworkInformation;
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
 
 namespace CoffeeMachineController
 {
@@ -28,15 +27,13 @@ namespace CoffeeMachineController
         /// <summary>
         /// Default value in milliseconds to automatically turn off the coffee machine.
         /// </summary>
-        private const int TURN_OFF_MS_DEFAULT = 1800000;
+        private const int TURN_OFF_MIN_DEFAULT = 45;
         private const string NTP_POOL_URL = "fi.pool.ntp.org";
         private const int NTP_OFFSET = 0;
 
         private NetworkInterface[] _networkInterfaces;
         private Timer TurnOffCoffeeTimer { get; set; }
-        private AutoResetEvent TurnOffCoffeeTimerAutoEvent { get; set; }
         private Timer TurnOnCoffeeMachineTimer { get; set; }
-        private AutoResetEvent TurnOnCoffeeMachineTimerAutoEvent { get; set; }
 
         public bool IsRunning { get; private set; }
         public DateTime MachineRunningSince { get; } = DateTime.Now;
@@ -112,35 +109,27 @@ namespace CoffeeMachineController
         /// <param name="turnOffMode"></param>
         /// <param name="customMsToTurnOff">A custom time in milliseconds to turn of the machine
         /// if automatic turn off mode is switched on.</param>
-        /// <param name="delayBrewingInMs">The delay in milliseconds, befor turning the coffee machine on.</param>
+        /// <param name="delayBrewingByMinutes">The delay in milliseconds, befor turning the coffee machine on.</param>
         public void RequestTurnOnCoffeeMachine(TurnOffMode turnOffMode = TurnOffMode.Automatic,
-            int customMsToTurnOff = 0, int delayBrewingInMs = 0)
+            int customMinutesToTurnOff = 0, int delayBrewingByMinutes = 0)
         {
             TurnOffMode = turnOffMode;
 
             // Delay the brewing if requested
-            if (delayBrewingInMs > 0)
+            if (delayBrewingByMinutes > 0)
             {
                 this.MachineState = CoffeeMachineState.TimedForActivation;
 
-                BrewingCoffeeAt = DateTime.Now.AddSeconds(delayBrewingInMs);
+                BrewingCoffeeAt = DateTime.Now.AddMinutes(delayBrewingByMinutes);
 
-                // Create an AutoResetEvent to signal the timeout threshold in the
-                // timer callback has been reached.
-                TurnOnCoffeeMachineTimerAutoEvent = new AutoResetEvent(false);
+                TimeSpan dueTime = new TimeSpan(0, delayBrewingByMinutes, 0);
 
-                TimeSpan dueTime = new TimeSpan(0, 0, 0, 0, delayBrewingInMs);
-
-                TurnOnCoffeeMachineTimer = new Timer((obj) => { TurnOnCoffeeMachine(customMsToTurnOff); }, 
-                    TurnOnCoffeeMachineTimerAutoEvent, dueTime, dueTime);
-
-                // When autoEvent signals, dispose of the timer.
-                TurnOnCoffeeMachineTimerAutoEvent.WaitOne();
-                TurnOnCoffeeMachineTimer.Dispose();
+                TurnOnCoffeeMachineTimer = new Timer((obj) => { TurnOnCoffeeMachine(customMinutesToTurnOff); }, 
+                    null, dueTime, dueTime);
             }
             else
             {
-                TurnOnCoffeeMachine(customMsToTurnOff);
+                TurnOnCoffeeMachine(customMinutesToTurnOff);
             }
         }
 
@@ -151,14 +140,10 @@ namespace CoffeeMachineController
         public void RequestTurnOffCoffeeMachine()
         {
             // Release and stop the delayed brewing
-            if (TurnOnCoffeeMachineTimerAutoEvent != null)
-                TurnOnCoffeeMachineTimerAutoEvent.Set();
+            if (TurnOnCoffeeMachineTimer != null)
+                TurnOnCoffeeMachineTimer.Dispose();
 
             BrewingCoffeeAt = DateTime.MinValue;
-
-            // Release and stop automatic deactivation timer
-            if (TurnOffCoffeeTimerAutoEvent != null)
-                TurnOffCoffeeTimerAutoEvent.Set();
 
             // Finally turn the machine off
             TurnOffCoffeeMachine();
@@ -168,10 +153,14 @@ namespace CoffeeMachineController
         /// <summary>
         /// Turn the coffee machine on.
         /// </summary>
-        /// <param name="customMsToTurnOff">A custom time in milliseconds to turn of the machine
+        /// <param name="customMinutesToTurnOff">A custom time in milliseconds to turn of the machine
         /// if automatic turn off mode is switched on.</param>
-        private void TurnOnCoffeeMachine(int customMsToTurnOff = 0)
+        private void TurnOnCoffeeMachine(int customMinutesToTurnOff = 0)
         {
+            // If delay timer was running, dispose it at this point
+            if (TurnOnCoffeeMachineTimer != null)
+                TurnOnCoffeeMachineTimer.Dispose();
+
             this.MachineState = CoffeeMachineState.Brewing;
 
             Ports.Led.Write(true);
@@ -180,17 +169,9 @@ namespace CoffeeMachineController
             // Setup automatic turn off if requested by the client.
             if (TurnOffMode == TurnOffMode.Automatic)
             {
-                // Create an AutoResetEvent to signal the timeout threshold in the
-                // timer callback has been reached.
-                TurnOffCoffeeTimerAutoEvent = new AutoResetEvent(false);
-
-                TimeSpan dueTime = new TimeSpan(0, 0, 0, 0, customMsToTurnOff <= 0 ? TURN_OFF_MS_DEFAULT : customMsToTurnOff);
+                TimeSpan dueTime = new TimeSpan(0, customMinutesToTurnOff <= 0 ? TURN_OFF_MIN_DEFAULT : customMinutesToTurnOff, 0);
                 
-                TurnOffCoffeeTimer = new Timer((obj) => { TurnOffCoffeeMachine(); }, TurnOffCoffeeTimerAutoEvent, dueTime, dueTime);
-
-                // When autoEvent signals, dispose of the timer.
-                TurnOffCoffeeTimerAutoEvent.WaitOne();
-                TurnOffCoffeeTimer.Dispose();
+                TurnOffCoffeeTimer = new Timer((obj) => { TurnOffCoffeeMachine(); }, null, dueTime, dueTime);
             }
         }
 
@@ -200,6 +181,10 @@ namespace CoffeeMachineController
         /// </summary>
         private void TurnOffCoffeeMachine()
         {
+            // If automatic turn off timer was running, dispose it at this point
+            if (TurnOffCoffeeTimer != null)
+                TurnOffCoffeeTimer.Dispose();
+
             this.MachineState = CoffeeMachineState.Standby;
 
             Ports.Led.Write(false);
