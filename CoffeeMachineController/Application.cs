@@ -29,6 +29,8 @@ namespace CoffeeMachineController
         /// Default value in milliseconds to automatically turn off the coffee machine.
         /// </summary>
         private const int TURN_OFF_MS_DEFAULT = 1800000;
+        private const string NTP_POOL_URL = "fi.pool.ntp.org";
+        private const int NTP_OFFSET = 0;
 
         private NetworkInterface[] _networkInterfaces;
         private Timer TurnOffCoffeeTimer { get; set; }
@@ -84,7 +86,8 @@ namespace CoffeeMachineController
                 Debug.Print("Network done.");
 
                 //Setup local time of the card
-                
+                Utility.SetLocalTime(NTPTime(NTP_POOL_URL, NTP_OFFSET));
+                Debug.Print("Local time was set. Current local time is " + DateTime.Now);
 
                 // start web server
                 MapleServer server = new MapleServer();
@@ -360,6 +363,59 @@ namespace CoffeeMachineController
             }
 
             return hexString;
+        }
+
+        /// <summary>
+        /// Get the current time from a network time prtocol server.
+        /// </summary>
+        /// <param name="timeServer">Server url,</param>
+        /// <param name="UTC_offset">The offset that should be applied to the time received from the ntp pool.</param>
+        /// <returns></returns>
+        private DateTime NTPTime(string timeServer, int UTC_offset)
+        {
+            // Find endpoint for timeserver
+            IPEndPoint ep = new IPEndPoint(Dns.GetHostEntry(timeServer).AddressList[0], 123);
+
+            // Connect to timeserver
+            Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            s.Connect(ep);
+
+            // Make send/receive buffer
+            byte[] ntpData = new byte[48];
+            Array.Clear(ntpData, 0, 48);
+
+            // Set protocol version
+            ntpData[0] = 0x1B;
+
+            // Send Request
+            s.Send(ntpData);
+
+            // Receive Time
+            s.Receive(ntpData);
+
+            byte offsetTransmitTime = 40;
+
+            ulong intpart = 0;
+            ulong fractpart = 0;
+
+            for (int i = 0; i <= 3; i++)
+                intpart = (intpart << 8) | ntpData[offsetTransmitTime + i];
+
+            for (int i = 4; i <= 7; i++)
+                fractpart = (fractpart << 8) | ntpData[offsetTransmitTime + i];
+
+            ulong milliseconds = (intpart * 1000 + (fractpart * 1000) / 0x100000000L);
+
+            s.Close();
+
+            TimeSpan timeSpan = TimeSpan.FromTicks((long)milliseconds * TimeSpan.TicksPerMillisecond);
+            DateTime dateTime = new DateTime(1900, 1, 1);
+            dateTime += timeSpan;
+
+            TimeSpan offsetAmount = new TimeSpan(0, UTC_offset, 0, 0, 0);
+            DateTime networkDateTime = (dateTime + offsetAmount);
+
+            return networkDateTime;
         }
     }
 }
